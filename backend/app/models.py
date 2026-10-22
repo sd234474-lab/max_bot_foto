@@ -514,3 +514,11 @@ class ExchangeFile(Base):
         CheckConstraint("status IN ('PENDING','AVAILABLE','DELETING','DELETED')"),
         Index("ix_exchange_files_section", "root", "section", "publication_id"),
     )
+
+
+# Q1-01 additive tenant contract tables; imported to register Base.metadata.
+from app.contract_models import (  # noqa: F401
+    Contract, ContractRevision, ContractStage, ContractPeriod, ContractWorkLine,
+    ContractTerritory, ContractTerritoryDistrict, ContractWorkApplicability,
+    PhysicalIndicatorType, ContractPhysicalValue, ContractPriceLine,
+)
