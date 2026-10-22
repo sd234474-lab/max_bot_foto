@@ -7,7 +7,6 @@ from sqlalchemy import UniqueConstraint
 from app import models  # noqa: F401
 from app.db import Base
 
-
 EXPECTED = {
     "contracts", "contract_revisions", "contract_stages", "contract_periods",
     "contract_work_lines", "contract_territories", "contract_territory_districts",
