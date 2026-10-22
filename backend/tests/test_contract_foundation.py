@@ -2,10 +2,10 @@
 import importlib.util
 from pathlib import Path
 
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy import UniqueConstraint
 
-from app.db import Base
 from app import models  # noqa: F401
+from app.db import Base
 
 
 EXPECTED = {
