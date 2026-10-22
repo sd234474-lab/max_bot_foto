@@ -1,6 +1,7 @@
 """Q1-01 tenant-local contract foundation. No runtime routes or productive data changes."""
 from datetime import date, datetime
 from decimal import Decimal
+
 from sqlalchemy import (
     CheckConstraint,
     Date,
