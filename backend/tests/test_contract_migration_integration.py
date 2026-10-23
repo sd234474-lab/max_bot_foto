@@ -30,6 +30,7 @@ def test_contract_migration_upgrade_and_downgrade_on_disposable_database():
         env = os.environ.copy()
         env["DATABASE_URL"] = database_url
         env["APP_ENV"] = "test"
+        env["PYTHONPATH"] = str(root / "backend")
 
         def alembic(*args):
             subprocess.run(
