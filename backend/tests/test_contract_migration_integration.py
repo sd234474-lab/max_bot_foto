@@ -24,7 +24,7 @@ def test_contract_migration_upgrade_and_downgrade_on_disposable_database():
     database_url = parsed.set(database=database_name).render_as_string(hide_password=False)
     admin_url = parsed.set(database="postgres").render_as_string(hide_password=False)
 
-    with psycopg.connect(admin_url, autocommit=True) as admin:
+    with psycopg.connect(admin_url.replace('postgresql+psycopg://', 'postgresql://'), autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
     try:
         env = os.environ.copy()
@@ -39,21 +39,21 @@ def test_contract_migration_upgrade_and_downgrade_on_disposable_database():
 
         alembic("upgrade", "0031")
         alembic("upgrade", "0032")
-        with psycopg.connect(database_url) as connection:
+        with psycopg.connect(database_url.replace('postgresql+psycopg://', 'postgresql://')) as connection:
             rows = connection.execute(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema='public' AND table_name='contracts'"
             ).fetchall()
             assert rows == [("contracts",)]
         alembic("downgrade", "0031")
-        with psycopg.connect(database_url) as connection:
+        with psycopg.connect(database_url.replace('postgresql+psycopg://', 'postgresql://')) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM information_schema.tables "
                 "WHERE table_schema='public' AND table_name='contracts'"
             ).fetchone()[0]
             assert count == 0
     finally:
-        with psycopg.connect(admin_url, autocommit=True) as admin:
+        with psycopg.connect(admin_url.replace('postgresql+psycopg://', 'postgresql://'), autocommit=True) as admin:
             admin.execute(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                 "WHERE datname = %s AND pid <> pg_backend_pid()", (database_name,)
