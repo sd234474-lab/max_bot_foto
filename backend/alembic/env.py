@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, pool
 
 from alembic import context
 from app import models  # noqa: F401
+from app import contractor_models  # noqa: F401
 from app.config import settings
 from app.db import Base
 

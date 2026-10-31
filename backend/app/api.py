@@ -121,6 +121,7 @@ from app.security_telemetry import SecurityTelemetry
 from app.signin import router as signin_router
 from app.work_types import catalog_rows, require_work_type, work_catalog
 from app.work_types import router as work_types_router
+from app.contractor import router as contractor_router
 
 app = FastAPI(
     title="Метка · операторская панель",
@@ -129,6 +130,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 app.include_router(auth_router)
+app.include_router(contractor_router)
 app.include_router(inspection_router)
 app.include_router(inspection_owner_router)
 app.include_router(inspection_admin_router)

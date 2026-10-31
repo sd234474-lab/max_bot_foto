@@ -12,6 +12,7 @@ import Learning from './Learning';
 import Exchange from './Exchange';
 import Settings from './Settings';
 import WorkTypes from './WorkTypes';
+import Contractor from './Contractor';
 import News from './News';
 import Avatar from './Avatar';
 import OperatorChats from './OperatorChats';
@@ -66,6 +67,7 @@ export default function App() {
   if(!meta)return <div className="full-loading"><ErrorBox error={error}/>{error?<button onClick={()=>refresh().then(()=>setError('')).catch(e=>setError(e.message))}>Повторить</button>:'Загружаем справочники…'}</div>;
   const admin=user.role==='ADMIN_OPERATOR';
   const links = [
+    {to:'/contractor/vehicles', label:'НСИ подрядчика', Icon:Layers, allowed:true},
     {to:'/', label:'Обзор', Icon:ChartNoAxesCombined, allowed:hasPermission(user,'reports_view')},
     {to:'/news', label:'Новости', Icon:Newspaper, allowed:hasPermission(user,'news_view')},
     {to:'/photos', label:'Фотографии', Icon:Camera, allowed:hasPermission(user,'photos_view')},
@@ -111,6 +113,7 @@ export default function App() {
       <main className="workspace">
         <div className="topbar"><span className="workspace-identity"><span className="dot"/>{meta.organization?<><strong>{meta.organization.name}</strong>{user.is_platform_owner&&<a className="organization-switch" href="/">Все организации<ChevronRight size={13}/></a>}</>:<>Операторская панель</>}{meta.intake_cohort==='test'&&<span className="badge">Тестовый режим</span>}</span><span>{dateLabel(meta.today)} <span className="timezone">{meta.timezone}</span></span></div>
         <Routes>
+          <Route path="/contractor/:kind/:id?" element={<Contractor/>}/>
           <Route path="/" element={protectedPage('reports_view',<Overview/>)}/>
           <Route path="/news" element={protectedPage('news_view',<News owner={!!user.is_platform_owner}/>)}/>
           <Route path="/news/:slug" element={protectedPage('news_view',<News owner={!!user.is_platform_owner}/>)}/>

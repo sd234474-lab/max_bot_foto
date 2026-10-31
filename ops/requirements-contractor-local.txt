@@ -1,0 +1,2 @@
+# Windows process identity/tree management for the local start/stop wrapper.
+psutil==7.2.2; sys_platform == "win32"

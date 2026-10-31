@@ -20,3 +20,9 @@ backend/data/
 !.env.example
 *.log
 .playwright/
+.local/
+# Private sources and database/runtime artifacts must never enter Git.
+*.sqlite
+*.sqlite3
+*.dump
+*.zip
