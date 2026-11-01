@@ -1,12 +1,12 @@
 import { useRef, useState } from 'react';
 import type { DragEvent, ReactNode } from 'react';
-import { Link, NavLink } from 'react-router-dom';
-import { ArrowDown, ArrowUp, ArrowUpDown, GripVertical, PanelLeftClose, PanelLeftOpen, RotateCcw } from 'lucide-react';
+import { Link, NavLink, useLocation } from 'react-router-dom';
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight, FolderClosed, GripVertical, PanelLeftClose, PanelLeftOpen, RotateCcw } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { api } from './api';
 import { defaultSidebarOrder, moveSidebarItem, normalizeSidebarOrder, sortSidebarLinks } from './sidebarOrder';
 
-export type SidebarLink = {to: string; label: string; Icon: LucideIcon; badge?: ReactNode; href?: string; active?: boolean};
+export type SidebarLink = {to: string; label: string; Icon: LucideIcon; badge?: ReactNode; href?: string; active?: boolean; folder?: string};
 
 export default function SidebarNavigation({links, order, collapsed, toggle, onSaved, saveEndpoint = '/auth/sidebar-order', resetOrder = defaultSidebarOrder}: {
   links: SidebarLink[]; order: string[]; collapsed: boolean; toggle: () => void;
@@ -17,6 +17,8 @@ export default function SidebarNavigation({links, order, collapsed, toggle, onSa
   const [draft, setDraft] = useState(() => normalizeSidebarOrder(order));
   const [error, setError] = useState(''), [announcement, setAnnouncement] = useState('');
   const [dragging, setDragging] = useState<string | null>(null);
+  const location = useLocation();
+  const [folderOpen,setFolderOpen] = useState(!location.pathname.includes('/contractor/'));
   const [drop, setDrop] = useState<{target: string; side: 'before' | 'after'} | null>(null);
   const dragSource = useRef<string | null>(null);
   const shown = sortSidebarLinks(links, editing ? draft : order);
@@ -50,6 +52,9 @@ export default function SidebarNavigation({links, order, collapsed, toggle, onSa
     } catch (error) { setError((error as Error).message); }
     finally { setSaving(false); }
   }
+  function simpleLink({to,label,Icon,badge,href,active}:SidebarLink){
+    return href ? <Link key={to} to={href} title={label} aria-label={label} aria-current={active?'page':undefined} className={[active?'active':'',to==='/messages'?'operator-chats-link':''].filter(Boolean).join(' ')||undefined}><Icon size={19}/><span className="nav-item-label">{label}</span>{badge}</Link> : <NavLink key={to} to={to} title={label} aria-label={label} className={to==='/messages'?'operator-chats-link':to==='/news'?'news-notifications-link':undefined} end={to==='/' }><Icon size={19}/><span className="nav-item-label">{label}</span>{badge}</NavLink>;
+  }
 
   return <>
     <div className="sidebar-nav-heading">
@@ -74,7 +79,7 @@ export default function SidebarNavigation({links, order, collapsed, toggle, onSa
     </div>}
     <span className="sidebar-order-announcement" role="status" aria-live="polite">{announcement}</span>
     <nav id="workspace-navigation" aria-label="Основная навигация" className={editing?'sidebar-order-editing':undefined}>
-      {shown.map(({to, label, Icon, badge, href, active}, index) => editing ? <div key={to}
+      {editing ? shown.map(({to, label, Icon}, index) => <div key={to}
         className={'sidebar-sort-item' + (dragging===to?' dragging':'') + (drop?.target===to?' drop-'+drop.side:'')}
         draggable={!saving} onDragStart={event => {
           if (saving) {event.preventDefault(); return;}
@@ -99,10 +104,7 @@ export default function SidebarNavigation({links, order, collapsed, toggle, onSa
           <button type="button" disabled={saving || index===shown.length-1} aria-label={`Опустить «${label}»`} title="Ниже"
             onClick={() => move(to,shown[index+1].to,'after')}><ArrowDown size={14}/></button>
         </div>
-      </div> : href ? <Link key={to} to={href} title={label} aria-label={label} aria-current={active ? 'page' : undefined} className={[active ? 'active' : '',to==='/messages'?'operator-chats-link':''].filter(Boolean).join(' ') || undefined}><Icon size={19}/><span className="nav-item-label">{label}</span>{badge}</Link> : <NavLink key={to} to={to} title={label} aria-label={label}
-        className={to==='/messages'?'operator-chats-link':to==='/news'?'news-notifications-link':undefined} end={to==='/'}>
-        <Icon size={19}/><span className="nav-item-label">{label}</span>{badge}
-      </NavLink>)}
+      </div>) : <>{shown.filter(link=>!link.folder).map(simpleLink)}<div className="sidebar-folder"><button type="button" aria-expanded={folderOpen} onClick={()=>setFolderOpen(value=>!value)} title="Метка"><FolderClosed size={19}/><span className="nav-item-label">Метка</span>{folderOpen?<ChevronDown size={15}/>:<ChevronRight size={15}/>}</button>{folderOpen&&<div className="sidebar-folder-items">{shown.filter(link=>link.folder==='Метка').map(simpleLink)}</div>}</div></>}
     </nav>
   </>;
 }

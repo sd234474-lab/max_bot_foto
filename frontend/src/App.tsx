@@ -1,7 +1,7 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowDownToLine, ArchiveX, Camera, ChartNoAxesCombined, CheckCheck, ChevronLeft, ChevronRight, CircleCheck, ClipboardCheck, Layers, LogOut, Map, MapPin, MessageSquare, Newspaper, RefreshCw, ShieldCheck, Users } from 'lucide-react';
+import { ArrowDownToLine, ArchiveX, BookOpen, Camera, ChartNoAxesCombined, CheckCheck, ChevronLeft, ChevronRight, CircleCheck, ClipboardCheck, Layers, LogOut, Map, MapPin, MessageSquare, Newspaper, RefreshCw, ShieldCheck, Users } from 'lucide-react';
 import { api, dateLabel, photoLink, query, reportPhotoLink, shiftDate, statusNames } from './api';
 import type { Filters, Meta, PhotoPage, Report, User } from './types';
 import PhotoDetail from './PhotoDetail';
@@ -54,6 +54,7 @@ export function StatusBadge({ value }: { value: string }) { return <span classNa
 
 export default function App() {
   const sidebar = useSidebar();
+  const location = useLocation();
   const [user,setUser] = useState<User|null>(null), [meta,setMeta] = useState<Meta|null>(null), [loading,setLoading] = useState(true), [error,setError] = useState(''), [toast,setToast] = useState('');
   const appeals = useAppealNotifications(!!user && !!meta?.organization, user?.id);
   const navigate = useNavigate();
@@ -66,8 +67,10 @@ export default function App() {
   if(!user)return <Login initialError={error} onLogin={u=>{setUser(u);setError('');}}/>;
   if(!meta)return <div className="full-loading"><ErrorBox error={error}/>{error?<button onClick={()=>refresh().then(()=>setError('')).catch(e=>setError(e.message))}>Повторить</button>:'Загружаем справочники…'}</div>;
   const admin=user.role==='ADMIN_OPERATOR';
-  const links = [
-    {to:'/contractor/vehicles', label:'НСИ подрядчика', Icon:Layers, allowed:true},
+  const nsiLinks = [
+    {to:'/contractor/vehicles', href:'/contractor/vehicles', label:'Справочники', Icon:BookOpen, active:location.pathname.includes('/contractor/'), allowed:true},
+  ];
+  const legacyLinks = [
     {to:'/', label:'Обзор', Icon:ChartNoAxesCombined, allowed:hasPermission(user,'reports_view')},
     {to:'/news', label:'Новости', Icon:Newspaper, allowed:hasPermission(user,'news_view')},
     {to:'/photos', label:'Фотографии', Icon:Camera, allowed:hasPermission(user,'photos_view')},
@@ -87,8 +90,9 @@ export default function App() {
     {to:'/jobs', label:'Обработка', Icon:RefreshCw, allowed:hasPermission(user,'jobs_manage')},
     {to:'/exchange', label:'Обмен с АРМ', Icon:ArrowDownToLine, allowed:hasPermission(user,'exchange_manage')},
     {to:'/learning', label:'Обучение нейросети', Icon:Layers, allowed:hasPermission(user,'learning_manage')},
-  ].filter(link => link.allowed);
-  const home = links.find(link => link.to !== '/news')?.to || '/news';
+  ].map(link=>({...link,folder:'Метка'}));
+  const links = [...nsiLinks,...legacyLinks].filter(link => link.allowed);
+  const home = legacyLinks.find(link => link.allowed && link.to !== '/news')?.to || '/news';
   const denied = <Navigate to={home} replace/>;
   const protectedPage = (code:string, element:ReactNode) => hasPermission(user,code) ? element : denied;
   return <Context.Provider value={{user,meta,refresh,notify:setToast,updateUser:setUser}}>

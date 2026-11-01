@@ -34,6 +34,7 @@
 .app .sidebar nav a > svg { width: 20px; height: 20px; flex-shrink: 0; }
 .app .sidebar .nav-item-label { min-width: 0; }
 .app .sidebar nav a .count-pill.appeal-count { background: #dc3545; color: #fff; box-shadow: 0 0 0 3px #dc35451f; margin-left: auto; }
+.sidebar-folder>button{display:flex;align-items:center;justify-content:flex-start;gap:13px;width:100%;min-height:42px;padding:10px 12px;border:0;background:transparent;color:var(--secondary,#728377);font-size:12px}.sidebar-folder>button:hover{background:var(--surface-soft,#f3f6f4)}.sidebar-folder>button svg:last-child{margin-left:auto}.sidebar-folder-items{margin:2px 0 8px 12px;padding-left:8px;border-left:1px solid var(--border)}.app .sidebar .sidebar-folder-items a{min-height:36px;padding:7px 9px;font-size:11px}.sidebar-folder-items a>svg{width:17px!important;height:17px!important}
 .app.sidebar-expanded .sidebar .nav-label,
 .app.sidebar-expanded .sidebar .account-info { display: block; }
 .app.sidebar-expanded .sidebar .account-link { flex: 1; justify-content: flex-start; }
@@ -47,6 +48,7 @@
 .app.sidebar-collapsed .sidebar-nav-heading { justify-content: center; margin: 20px 0 12px; }
 .app.sidebar-collapsed .sidebar-heading-actions { flex-direction: column; }
 .app.sidebar-collapsed .sidebar nav a { justify-content: center; padding: 12px 0; }
+.app.sidebar-collapsed .sidebar-folder>button{justify-content:center;padding:12px 0}.app.sidebar-collapsed .sidebar-folder>button svg:last-child,.app.sidebar-collapsed .sidebar-folder-items{display:none}
 .app.sidebar-collapsed .sidebar .operator-chat-badge { position: absolute; right: 0; top: 3px; margin: 0; font-size: 9px; min-width: 16px; }
 .app.sidebar-collapsed .sidebar-bottom { flex-direction: column; gap: 10px; padding: 16px 0; }
 .app.sidebar-collapsed .sidebar .account-link { flex: 0 0 auto; justify-content: center; padding: 5px; }
