@@ -1,5 +1,6 @@
 """NSI behavior tests use synthetic data only; no customer artifacts in Git."""
 
+import hashlib
 import io
 import zipfile
 from datetime import date, datetime, timezone
@@ -22,6 +23,7 @@ from app.contractor_import import (
 )
 from app.contractor_models import (
     CATALOGUES,
+    Contract,
     Counterparty,
     Document,
     DocumentVehicleLink,
@@ -29,6 +31,8 @@ from app.contractor_models import (
     ImportEvent,
     QuestionnaireImport,
     Vehicle,
+    VehicleApprovalDecision,
+    VehicleApprovalRequest,
     VehicleRelation,
     VehicleType,
     WorkCategory,
@@ -63,6 +67,8 @@ def nsi():
         History.__tablename__,
         ImportEvent.__tablename__,
         QuestionnaireImport.__tablename__,
+        VehicleApprovalRequest.__tablename__,
+        VehicleApprovalDecision.__tablename__,
     }
     for table in Base.metadata.sorted_tables:
         if table.name in tables:
@@ -76,7 +82,7 @@ def nsi():
 def nsi_client(nsi):
     app = FastAPI()
     app.include_router(router)
-    actor = SimpleNamespace(id=1, role="ADMIN_OPERATOR")
+    actor = SimpleNamespace(id=1, name="Тестовый оператор", role="ADMIN_OPERATOR")
     app.dependency_overrides[get_db] = lambda: nsi
     app.dependency_overrides[current_user] = lambda: actor
     with TestClient(app) as client:
@@ -110,7 +116,7 @@ def test_operator_read_only(nsi_client):
 
 
 def test_vehicle_list_is_sorted_by_short_name_and_enriched(nsi_client, nsi):
-    client, _ = nsi_client
+    client, actor = nsi_client
     party = Counterparty(id="party", name="Подрядчик", status="REVIEW", details={})
     vehicles = [
         Vehicle(id="b", name="333Шакман", plate="Е333РА186", vehicle_type="Самосвал", status="REVIEW", details={}),
@@ -623,6 +629,184 @@ def test_vehicle_document_queue_and_controlled_assignment(nsi_client, nsi):
     assert [(item["id"], item["document_kind"]) for item in documents] == [("sts", "STS")]
 
 
+def test_calibration_confirmation_is_explicit_atomic_and_idempotent(
+    nsi_client, nsi, tmp_path, monkeypatch
+):
+    content = b"%PDF-1.4 synthetic calibration"
+    source = tmp_path / "questionnaire.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("calibration.pdf", content)
+    monkeypatch.setattr("app.contractor.questionnaire_source_root", lambda: tmp_path.resolve())
+    vehicle = Vehicle(
+        id="dump",
+        name="679HOWO",
+        plate="Е679РН186",
+        vehicle_type="Самосвал",
+        status="CONFIRMED",
+        calibration_m3=25,
+        calibration_on=date(2020, 1, 1),
+    )
+    document = Document(
+        id="calibration",
+        name="Справка Хово Е679РН186.pdf",
+        sha256=hashlib.sha256(content).hexdigest(),
+        location=f"{source}!calibration.pdf",
+        status="REVIEW",
+        document_scope="VEHICLE",
+        document_kind="CALIBRATION",
+        link_state="LINKED",
+    )
+    link = DocumentVehicleLink(
+        id="calibration-link",
+        name=document.name,
+        status="CONFIRMED",
+        document_id=document.id,
+        vehicle_id=vehicle.id,
+        document_kind="CALIBRATION",
+    )
+    nsi.add_all([vehicle, document])
+    nsi.commit()
+    nsi.add(link)
+    nsi.commit()
+    client, actor = nsi_client
+
+    before = client.get("/api/contractor/vehicle-approvals/candidates").json()[0]
+    assert before["calibration"]["ready"] is False
+    assert [item["code"] for item in before["calibration"]["reasons"]] == [
+        "DOCUMENT_NOT_CONFIRMED"
+    ]
+    assert client.post("/api/contractor/documents/calibration/confirm").status_code == 422
+    actor.role = "OPERATOR"
+    assert (
+        client.post(
+            "/api/contractor/vehicles/dump/calibrations/calibration/confirm",
+            json={"volume_m3": "25.000"},
+        ).status_code
+        == 403
+    )
+    assert document.status == "REVIEW"
+    actor.role = "ADMIN_OPERATOR"
+
+    confirmed = client.post(
+        "/api/contractor/vehicles/dump/calibrations/calibration/confirm",
+        json={"volume_m3": "25.000"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["calibration"]["ready"] is True
+    assert document.status == "CONFIRMED"
+    assert document.details["calibration_verified_by_name"] == "Тестовый оператор"
+    assert document.details["calibration_confirmed_volume_m3"] == "25.000"
+    assert vehicle.calibration_m3 == 25
+    assert vehicle.calibration_on != date(2020, 1, 1)
+    history_count = len(nsi.scalars(select(History)).all())
+    versions = document.version, vehicle.version
+
+    repeated = client.post(
+        "/api/contractor/vehicles/dump/calibrations/calibration/confirm",
+        json={"volume_m3": "25.000"},
+    )
+    assert repeated.status_code == 200
+    assert len(nsi.scalars(select(History)).all()) == history_count
+    assert (document.version, vehicle.version) == versions
+
+
+def test_calibration_readiness_prefers_confirmed_document_over_newer_review(
+    nsi_client, nsi, tmp_path
+):
+    confirmed_file = tmp_path / "confirmed.pdf"
+    review_file = tmp_path / "review.pdf"
+    confirmed_file.write_bytes(b"confirmed")
+    review_file.write_bytes(b"review")
+    vehicle = Vehicle(
+        id="dump",
+        name="Test dump",
+        plate="Е100РН186",
+        vehicle_type="Самосвал",
+        calibration_m3=20,
+    )
+    confirmed = Document(
+        id="confirmed",
+        name="Confirmed.pdf",
+        sha256=hashlib.sha256(confirmed_file.read_bytes()).hexdigest(),
+        location=str(confirmed_file),
+        status="CONFIRMED",
+        document_kind="CALIBRATION",
+        details={"calibration_verified_at": "2026-11-01T10:00:00+00:00"},
+    )
+    review = Document(
+        id="review",
+        name="Review.pdf",
+        sha256=hashlib.sha256(review_file.read_bytes()).hexdigest(),
+        location=str(review_file),
+        status="REVIEW",
+        document_kind="CALIBRATION",
+    )
+    nsi.add_all([vehicle, confirmed, review])
+    nsi.commit()
+    nsi.add_all(
+        [
+            DocumentVehicleLink(
+                id="confirmed-link",
+                name="Confirmed",
+                document_id="confirmed",
+                vehicle_id="dump",
+                document_kind="CALIBRATION",
+            ),
+            DocumentVehicleLink(
+                id="review-link",
+                name="Review",
+                document_id="review",
+                vehicle_id="dump",
+                document_kind="CALIBRATION",
+            ),
+        ]
+    )
+    nsi.commit()
+    client, _ = nsi_client
+
+    row = client.get("/api/contractor/vehicle-approvals/candidates").json()[0]
+    assert row["calibration"]["ready"] is True
+    assert row["calibration"]["document_id"] == "confirmed"
+
+
+def test_calibration_readiness_reports_missing_volume_and_file(nsi_client, nsi):
+    vehicle = Vehicle(
+        id="dump",
+        name="Test dump",
+        plate="Е101РН186",
+        vehicle_type="Самосвал",
+    )
+    document = Document(
+        id="missing-file",
+        name="Missing.pdf",
+        sha256="7" * 64,
+        location="missing-file.pdf",
+        status="CONFIRMED",
+        document_kind="CALIBRATION",
+    )
+    nsi.add_all([vehicle, document])
+    nsi.commit()
+    nsi.add_all(
+        [
+            DocumentVehicleLink(
+                id="missing-link",
+                name="Missing",
+                document_id=document.id,
+                vehicle_id=vehicle.id,
+                document_kind="CALIBRATION",
+            ),
+        ]
+    )
+    nsi.commit()
+    client, _ = nsi_client
+
+    row = client.get("/api/contractor/vehicle-approvals/candidates").json()[0]
+    assert {item["code"] for item in row["calibration"]["reasons"]} == {
+        "VOLUME_MISSING",
+        "FILE_UNAVAILABLE",
+    }
+
+
 def test_approval_letter_pdf_uses_selected_business_values(tmp_path):
     from PIL import Image
 
@@ -654,3 +838,94 @@ def test_approval_letter_pdf_uses_selected_business_values(tmp_path):
     )
     assert pdf.startswith(b"%PDF")
     assert len(pdf) > 10_000
+
+
+def test_approval_letter_zip_uses_same_readiness_rule_and_registers_request(
+    nsi_client, nsi, tmp_path, monkeypatch
+):
+    calibration_file = tmp_path / "calibration.pdf"
+    calibration_file.write_bytes(b"%PDF-1.4 confirmed calibration")
+    signature = tmp_path / "signature.png"
+    signature.write_bytes(b"synthetic signature asset")
+    vehicle_type = VehicleType(
+        id="dump-type", name="Самосвал", code="DUMP_TRUCK", requires_calibration=True
+    )
+    vehicle = Vehicle(
+        id="dump",
+        name="679HOWO",
+        plate="Е679РН186",
+        vehicle_type="DUMP_TRUCK",
+        vehicle_type_id=vehicle_type.id,
+        model="HOWO",
+        calibration_m3=25,
+        calibration_on=date(2026, 11, 5),
+    )
+    document = Document(
+        id="calibration",
+        name="Справка Хово Е679РН186.pdf",
+        sha256=hashlib.sha256(calibration_file.read_bytes()).hexdigest(),
+        location=str(calibration_file),
+        status="CONFIRMED",
+        document_kind="CALIBRATION",
+        details={"calibration_verified_at": "2026-11-05T08:00:00+00:00"},
+    )
+    nsi.add(vehicle_type)
+    nsi.commit()
+    nsi.add_all(
+        [
+            Contract(id="58", name="Контракт 58", number="ЭА.2026.00058"),
+            Contract(id="60", name="Контракт 60", number="ЭА.2026.00060"),
+            vehicle,
+            document,
+        ]
+    )
+    nsi.commit()
+    nsi.add(
+            DocumentVehicleLink(
+                id="calibration-link",
+                name=document.name,
+                document_id=document.id,
+                vehicle_id=vehicle.id,
+                document_kind="CALIBRATION",
+            )
+    )
+    nsi.commit()
+    monkeypatch.setattr("app.contractor.approval_signature_path", lambda: signature)
+    monkeypatch.setattr(
+        "app.contractor.render_approval_pdf", lambda *args: b"%PDF-1.4 synthetic letter"
+    )
+    monkeypatch.setattr(
+        "app.contractor.current_organization",
+        lambda: SimpleNamespace(data_dir=tmp_path / "workspace"),
+    )
+    client, _ = nsi_client
+
+    response = client.post(
+        "/api/contractor/vehicle-approvals/letter",
+        json={
+            "contract_ids": ["58", "60"],
+            "vehicle_ids": ["dump"],
+            "letter_number": "TEST-58-60",
+            "letter_date": "2026-11-05",
+            "sender_lines": ["Отправитель", "Адрес", "Подписант"],
+            "recipient": "Заказчику",
+            "body_text": "По контрактам [выбранные номера] направляем технику.",
+            "monitoring_url": "https://monitoring.example.test",
+            "monitoring_login": "test-login",
+            "monitoring_password": "test-password",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        names = archive.namelist()
+        assert any(name.endswith(".pdf") and "Письмо" in name for name in names)
+        assert any("679HOWO" in name and "25" in name for name in names)
+        assert archive.read(next(name for name in names if "Письмо" in name)).startswith(
+            b"%PDF"
+        )
+    request = nsi.scalar(select(VehicleApprovalRequest))
+    decision = nsi.scalar(select(VehicleApprovalDecision))
+    assert request.contract_ids == ["58", "60"]
+    assert decision.vehicle_id == "dump"
+    assert decision.calibration_document_id == "calibration"

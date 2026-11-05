@@ -566,11 +566,35 @@ async def upload_questionnaire(request: Request, db: Db, user: AdminUser):
         temporary.unlink(missing_ok=True)
 
 
+def questionnaire_source_root():
+    return (Path(__file__).resolve().parents[2].parent / "questionnaires").resolve()
+
+
 def questionnaire_document_bytes(document):
-    path = Path(document.location)
-    if "!" in document.location or not path.is_file() or path.stat().st_size > 52_428_800:
+    parts = document.location.split("!")
+    path = Path(parts[0]).resolve()
+    questionnaires = questionnaire_source_root()
+    if len(parts) == 1:
+        if not path.is_file() or path.stat().st_size > 52_428_800:
+            return None
+        content = path.read_bytes()
+    elif len(parts) not in {2, 3} or questionnaires not in path.parents:
         return None
-    content = path.read_bytes()
+    else:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                info = archive.getinfo(parts[1])
+                if info.file_size > 52_428_800:
+                    return None
+                content = archive.read(info)
+            if len(parts) == 3:
+                with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                    info = archive.getinfo(parts[2])
+                    if info.file_size > 52_428_800:
+                        return None
+                    content = archive.read(info)
+        except (OSError, KeyError, zipfile.BadZipFile):
+            return None
     return content if hashlib.sha256(content).hexdigest() == document.sha256 else None
 
 
@@ -858,12 +882,175 @@ def vehicle_ownership(id: str, db: Db, user: CurrentUser):
     }
 
 
+def calibration_document_key(document):
+    """Choose the current calibration deterministically without hiding history."""
+    details = document.details or {}
+    verified_at = str(details.get("calibration_verified_at") or "")
+    created_at = document.created_at.isoformat() if document.created_at else ""
+    return verified_at, created_at, document.version, document.id
+
+
+def vehicle_calibration_readiness(db, vehicle, *, lock=False):
+    """Single rule used by confirmation, selection and letter issue."""
+    link_query = select(DocumentVehicleLink).where(
+        DocumentVehicleLink.vehicle_id == vehicle.id,
+        DocumentVehicleLink.document_kind == "CALIBRATION",
+    )
+    if lock:
+        link_query = link_query.with_for_update()
+    links = db.scalars(link_query).all()
+    document_ids = {link.document_id for link in links}
+    document_query = select(Document).where(Document.id.in_(document_ids))
+    if lock:
+        document_query = document_query.with_for_update()
+    documents = list(db.scalars(document_query).all()) if document_ids else []
+    confirmed = [document for document in documents if document.status == "CONFIRMED"]
+    selected = max(confirmed or documents, key=calibration_document_key, default=None)
+    reasons = []
+    if not documents:
+        reasons.append({"code": "NO_DOCUMENT", "message": "Нет документа тарировки"})
+    elif not confirmed:
+        reasons.append(
+            {"code": "DOCUMENT_NOT_CONFIRMED", "message": "Документ тарировки не подтверждён"}
+        )
+    if vehicle.calibration_m3 is None:
+        reasons.append({"code": "VOLUME_MISSING", "message": "Не указан подтверждённый объём"})
+    file_available = bool(selected and questionnaire_document_bytes(selected) is not None)
+    if selected and not file_available:
+        reasons.append({"code": "FILE_UNAVAILABLE", "message": "Файл тарировки недоступен"})
+    details = (selected.details or {}) if selected else {}
+    return {
+        "ready": not reasons,
+        "reasons": reasons,
+        "document": serialize(selected) if selected else None,
+        "document_id": selected.id if selected else None,
+        "file_available": file_available,
+        "volume_m3": str(vehicle.calibration_m3) if vehicle.calibration_m3 is not None else None,
+        "verified_at": details.get("calibration_verified_at"),
+        "verified_by": details.get("calibration_verified_by_name"),
+    }
+
+
 @router.get("/vehicles/{id}/documents")
 def vehicle_documents(id: str, db: Db, user: CurrentUser):
-    get_record(db, "vehicles", id)
+    vehicle = get_record(db, "vehicles", id)
     links = db.scalars(select(DocumentVehicleLink).where(DocumentVehicleLink.vehicle_id == id)).all()
     documents = {item.id: item for item in db.scalars(select(Document).where(Document.id.in_({link.document_id for link in links}))).all()}
-    return [{**serialize(documents[link.document_id]), "link": serialize(link)} for link in links if link.document_id in documents]
+    readiness = vehicle_calibration_readiness(db, vehicle)
+    return [
+        {
+            **serialize(documents[link.document_id]),
+            "link": serialize(link),
+            "current_calibration": (
+                link.document_kind == "CALIBRATION"
+                and link.document_id == readiness["document_id"]
+            ),
+            "calibration_readiness": readiness if link.document_kind == "CALIBRATION" else None,
+        }
+        for link in sorted(
+            links,
+            key=lambda item: calibration_document_key(documents[item.document_id])
+            if item.document_id in documents
+            else ("", "", 0, item.document_id),
+            reverse=True,
+        )
+        if link.document_id in documents
+    ]
+
+
+@router.get("/vehicle-approvals/candidates")
+def vehicle_approval_candidates(db: Db, user: CurrentUser):
+    vehicles = db.scalars(select(Vehicle).order_by(Vehicle.name)).all()
+    type_ids = {vehicle.vehicle_type_id for vehicle in vehicles if vehicle.vehicle_type_id}
+    vehicle_types = {
+        item.id: item
+        for item in db.scalars(select(VehicleType).where(VehicleType.id.in_(type_ids))).all()
+    }
+    dumps = [
+        vehicle
+        for vehicle in vehicles
+        if "самосвал" in str(
+            vehicle_types.get(vehicle.vehicle_type_id).name
+            if vehicle.vehicle_type_id in vehicle_types
+            else vehicle.vehicle_type
+        ).casefold()
+        or (
+            vehicle.vehicle_type_id in vehicle_types
+            and vehicle_types[vehicle.vehicle_type_id].code == "DUMP_TRUCK"
+        )
+    ]
+    rows = {row["id"]: row for row in vehicle_rows(db, dumps)}
+    return [
+        {
+            **rows[vehicle.id],
+            "calibration": (readiness := vehicle_calibration_readiness(db, vehicle)),
+            "calibration_document_status": "CONFIRMED" if readiness["ready"] else "BLOCKED",
+        }
+        for vehicle in dumps
+    ]
+
+
+class CalibrationConfirmation(BaseModel):
+    volume_m3: Decimal = Field(gt=0, max_digits=12, decimal_places=3)
+
+
+@router.post("/vehicles/{vehicle_id}/calibrations/{document_id}/confirm")
+def confirm_calibration(
+    vehicle_id: str,
+    document_id: str,
+    body: CalibrationConfirmation,
+    db: Db,
+    user: AdminUser,
+):
+    vehicle = db.scalar(select(Vehicle).where(Vehicle.id == vehicle_id).with_for_update())
+    document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+    if vehicle is None or document is None:
+        raise HTTPException(404, "Машина или документ тарировки не найден")
+    link = db.scalar(
+        select(DocumentVehicleLink).where(
+            DocumentVehicleLink.vehicle_id == vehicle_id,
+            DocumentVehicleLink.document_id == document_id,
+            DocumentVehicleLink.document_kind == "CALIBRATION",
+        )
+    )
+    if link is None or document.document_kind != "CALIBRATION":
+        raise HTTPException(422, "Документ не является тарировкой этой машины")
+    if questionnaire_document_bytes(document) is None:
+        raise HTTPException(422, "Файл тарировки недоступен; подтверждение не сохранено")
+    volume = body.volume_m3.quantize(Decimal("0.001"))
+    details = document.details or {}
+    already_confirmed = (
+        document.status == "CONFIRMED"
+        and str(details.get("calibration_confirmed_volume_m3")) == str(volume)
+    )
+    if not already_confirmed:
+        before_document = serialize(document)
+        before_vehicle = serialize(vehicle)
+        verified_at = datetime.now(timezone.utc)
+        from app.config import settings
+
+        document.status = "CONFIRMED"
+        document.version += 1
+        document.details = {
+            **details,
+            "calibration_verified_at": verified_at.isoformat(),
+            "calibration_verified_by": user.id,
+            "calibration_verified_by_name": user.name,
+            "calibration_confirmed_volume_m3": str(volume),
+        }
+        vehicle.calibration_m3 = volume
+        vehicle.calibration_on = verified_at.astimezone(
+            ZoneInfo(settings().app_timezone)
+        ).date()
+        vehicle.version += 1
+        history(db, "documents", document, user, before_document)
+        history(db, "vehicles", vehicle, user, before_vehicle)
+        commit(db)
+    return {
+        "document": serialize(document),
+        "vehicle": serialize(vehicle),
+        "calibration": vehicle_calibration_readiness(db, vehicle),
+    }
 
 
 @router.get("/vehicle-documents/queue")
@@ -889,6 +1076,18 @@ class ApprovalLetterRequest(BaseModel):
     monitoring_url: str = Field(min_length=1, max_length=500)
     monitoring_login: str = Field(min_length=1, max_length=200)
     monitoring_password: str = Field(min_length=1, max_length=200)
+
+
+def approval_signature_path():
+    return (
+        Path(__file__).resolve().parents[2]
+        / ".local"
+        / "sources"
+        / "approval-letter-template"
+        / "word"
+        / "media"
+        / "image1.png"
+    )
 
 
 def render_approval_pdf(body, contracts, vehicle_rows_for_letter, signature_path):
@@ -993,32 +1192,31 @@ def create_approval_letter(body: ApprovalLetterRequest, db: Db, user: AdminUser)
     vehicles = db.scalars(select(Vehicle).where(Vehicle.id.in_(set(body.vehicle_ids)))).all()
     if len(vehicles) != len(set(body.vehicle_ids)):
         raise HTTPException(422, "Одна из выбранных машин не найдена")
-    links = db.scalars(
-        select(DocumentVehicleLink).where(
-            DocumentVehicleLink.vehicle_id.in_(set(body.vehicle_ids)),
-            DocumentVehicleLink.document_kind == "CALIBRATION",
+    readiness_by_vehicle = {
+        vehicle.id: vehicle_calibration_readiness(db, vehicle) for vehicle in vehicles
+    }
+    blocked = [
+        f"{vehicle.name}: "
+        + ", ".join(
+            reason["message"] for reason in readiness_by_vehicle[vehicle.id]["reasons"]
         )
-    ).all()
-    documents = {
-        document.id: document
-        for document in db.scalars(
-            select(Document).where(
-                Document.id.in_({link.document_id for link in links}),
-                Document.status == "CONFIRMED",
-            )
-        ).all()
-    }
+        for vehicle in vehicles
+        if not readiness_by_vehicle[vehicle.id]["ready"]
+    ]
+    if blocked:
+        raise HTTPException(422, "Нельзя сформировать письмо. " + "; ".join(blocked))
     calibration_by_vehicle = {
-        link.vehicle_id: documents[link.document_id]
-        for link in links
-        if link.document_id in documents
+        vehicle.id: db.get(Document, readiness_by_vehicle[vehicle.id]["document_id"])
+        for vehicle in vehicles
     }
-    missing = [vehicle.name for vehicle in vehicles if vehicle.id not in calibration_by_vehicle or vehicle.calibration_m3 is None]
-    if missing:
-        raise HTTPException(422, "Нет проверенной тарировки: " + ", ".join(missing))
-    signature_path = Path(__file__).resolve().parents[2] / ".local" / "sources" / "approval-letter-template" / "word" / "media" / "image1.png"
+    signature_path = approval_signature_path()
     if not signature_path.is_file():
         raise HTTPException(409, "Локальный эталон факсимиле не подготовлен")
+    type_ids = {vehicle.vehicle_type_id for vehicle in vehicles if vehicle.vehicle_type_id}
+    type_names = {
+        item.id: item.name
+        for item in db.scalars(select(VehicleType).where(VehicleType.id.in_(type_ids))).all()
+    }
     rows_for_letter, attachments = [], {}
     for vehicle in sorted(vehicles, key=lambda item: item.name.casefold()):
         document = calibration_by_vehicle[vehicle.id]
@@ -1029,7 +1227,7 @@ def create_approval_letter(body: ApprovalLetterRequest, db: Db, user: AdminUser)
         attachments[attachment_name] = content
         rows_for_letter.append(
             {
-                "vehicle_type": vehicle.vehicle_type,
+                "vehicle_type": type_names.get(vehicle.vehicle_type_id, vehicle.vehicle_type),
                 "calibration_m3": vehicle.calibration_m3,
                 "model": vehicle.model,
                 "plate": vehicle.plate,
@@ -1070,6 +1268,7 @@ def create_approval_letter(body: ApprovalLetterRequest, db: Db, user: AdminUser)
             link_state="NOT_REQUIRED",
         )
         db.add(request_document)
+        db.flush()
     approval_request = VehicleApprovalRequest(
         id=export_id,
         name=f"Письмо {body.letter_number} от {body.letter_date.strftime('%d.%m.%Y')}",
@@ -1082,6 +1281,7 @@ def create_approval_letter(body: ApprovalLetterRequest, db: Db, user: AdminUser)
         request_document_id=request_document.id,
     )
     db.add(approval_request)
+    db.flush()
     for vehicle in vehicles:
         calibration = calibration_by_vehicle[vehicle.id]
         db.add(
@@ -1270,6 +1470,11 @@ def confirm_document(id: str, db: Db, user: AdminUser):
     document = db.scalar(select(Document).where(Document.id == id).with_for_update())
     if document is None:
         raise HTTPException(404, "Документ не найден")
+    if document.document_kind == "CALIBRATION":
+        raise HTTPException(
+            422,
+            "Тарировка подтверждается из карточки машины вместе с проверенным объёмом",
+        )
     before = serialize(document)
     document.status = "CONFIRMED"
     document.version += 1
